@@ -118,14 +118,10 @@ static int tailscale_connect(vfs_handle_struct *handle,
 	const char *ip;
 	const char *socket_path;
 	char *login_name;
+	struct auth_session_info *old_session_info;
 	struct auth_session_info *new_session_info = NULL;
 	NTSTATUS status;
 	int ret;
-
-	/* Chain to the default VFS first */
-	ret = smb_vfs_call_connect(handle->next, service, user);
-	if (ret < 0)
-		return ret;
 
 	/* Get client IP */
 	ip = tsocket_address_inet_addr_string(conn->sconn->remote_address,
@@ -163,11 +159,24 @@ static int tailscale_connect(vfs_handle_struct *handle,
 		return -1;
 	}
 
-	/* Replace the guest session with the real user */
-	talloc_free(conn->session_info);
+	/* Replace the guest session with the real user before default VFS
+	 * connect, so that its chdir() into the share root runs as the
+	 * mapped user and Unix permissions are enforced by the kernel. */
+	old_session_info = conn->session_info;
 	conn->session_info = new_session_info;
 	conn->force_user = true;
 
+	/* Chain to the default VFS — chdir as the real user */
+	ret = smb_vfs_call_connect(handle->next, service, user);
+	if (ret < 0) {
+		/* Restore original session on failure */
+		conn->session_info = old_session_info;
+		conn->force_user = false;
+		talloc_free(new_session_info);
+		return ret;
+	}
+
+	talloc_free(old_session_info);
 	return 0;
 }
 

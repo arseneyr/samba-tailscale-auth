@@ -120,6 +120,12 @@
                   "guest ok" = "yes";
                   "vfs objects" = "tailscale:/run/mock-tailscaled-nomatch.sock";
                 };
+                permdeniedshare = {
+                  path = "/srv/permdenied";
+                  "read only" = "no";
+                  "guest ok" = "yes";
+                  "vfs objects" = "tailscale:/run/mock-tailscaled.sock";
+                };
               };
             };
 
@@ -160,6 +166,7 @@
             machine.succeed("mkdir -p /srv/share && chown testuser /srv/share")
             machine.succeed("mkdir -p /srv/denyshare")
             machine.succeed("mkdir -p /srv/nontailscale")
+            machine.succeed("mkdir -p /srv/permdenied && chmod 700 /srv/permdenied")
 
             # Happy path: tailscale user maps to existing local user
             machine.succeed("smbclient //127.0.0.1/testshare -N -c 'ls'")
@@ -171,6 +178,9 @@
 
             # Deny: tailscale user maps to non-existent local user
             machine.fail("smbclient //127.0.0.1/denyshare -N -c 'ls'")
+
+            # Deny: share root is 0700 root-owned, mapped user has no access
+            machine.fail("smbclient //127.0.0.1/permdeniedshare -N -c 'ls'")
 
             # Deny: client IP not recognized by tailscaled (not a tailscale peer)
             machine.fail("smbclient //127.0.0.1/nontailscale -N -c 'ls'")
