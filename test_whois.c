@@ -170,6 +170,49 @@ static void test_http_404(void)
 	printf("  PASS: HTTP 404\n");
 }
 
+static void *mock_server_stream_large(void *arg)
+{
+	struct mock_server *srv = arg;
+	int client_fd = accept(srv->listen_fd, NULL, NULL);
+	if (client_fd < 0)
+		return NULL;
+
+	char reqbuf[4096];
+	read(client_fd, reqbuf, sizeof(reqbuf));
+
+	/* Send headers then stream >256 KB of body */
+	const char *hdr = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n";
+	write(client_fd, hdr, strlen(hdr));
+
+	char chunk[4096];
+	memset(chunk, 'A', sizeof(chunk));
+	for (int i = 0; i < 128; i++) /* 128 * 4096 = 512 KB */
+		write(client_fd, chunk, sizeof(chunk));
+
+	close(client_fd);
+	return NULL;
+}
+
+static void test_oversized_response(void)
+{
+	struct mock_server srv;
+	mock_server_init(&srv, ""); /* response unused, we stream manually */
+
+	pthread_t tid;
+	pthread_create(&tid, NULL, mock_server_stream_large, &srv);
+
+	TALLOC_CTX *ctx = talloc_new(NULL);
+	char *result = tailscale_whois("100.64.1.6", srv.socket_path, ctx);
+
+	pthread_join(tid, NULL);
+	mock_server_cleanup(&srv);
+
+	ASSERT(result == NULL, "expected NULL on oversized response");
+
+	talloc_free(ctx);
+	printf("  PASS: oversized response\n");
+}
+
 static void test_connection_failure(void)
 {
 	TALLOC_CTX *ctx = talloc_new(NULL);
@@ -189,6 +232,7 @@ int main(void)
 	test_missing_user_profile();
 	test_missing_login_name();
 	test_http_404();
+	test_oversized_response();
 	test_connection_failure();
 	printf("All tests passed.\n");
 	return 0;

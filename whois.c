@@ -6,10 +6,16 @@
 
 #include "whois.h"
 
+#define MAX_RESPONSE_SIZE (256 * 1024)
+
 size_t curl_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
 {
 	struct curl_buf *buf = userdata;
 	size_t total = size * nmemb;
+	if (total / size != nmemb || buf->len + total + 1 < buf->len)
+		return 0; /* overflow */
+	if (buf->len + total > MAX_RESPONSE_SIZE)
+		return 0; /* response too large */
 	char *tmp = realloc(buf->data, buf->len + total + 1);
 	if (!tmp)
 		return 0;
@@ -29,13 +35,19 @@ char *tailscale_whois(const char *ip, const char *socket_path,
 	char *login_name = NULL;
 	long http_code = 0;
 
-	snprintf(url, sizeof(url),
-		 "http://local-tailscaled.sock/localapi/v0/whois?addr=%s:0",
-		 ip);
-
 	curl = curl_easy_init();
 	if (!curl)
 		return NULL;
+
+	char *escaped_ip = curl_easy_escape(curl, ip, 0);
+	if (!escaped_ip) {
+		curl_easy_cleanup(curl);
+		return NULL;
+	}
+	snprintf(url, sizeof(url),
+		 "http://local-tailscaled.sock/localapi/v0/whois?addr=%s:0",
+		 escaped_ip);
+	curl_free(escaped_ip);
 
 	curl_easy_setopt(curl, CURLOPT_UNIX_SOCKET_PATH, socket_path);
 	curl_easy_setopt(curl, CURLOPT_URL, url);
