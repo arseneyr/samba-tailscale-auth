@@ -13,6 +13,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include <errno.h>
 #include <syslog.h>
 #include <talloc.h>
@@ -37,7 +38,7 @@
 struct tsocket_address;
 struct auth_session_info;
 struct smbXsrv_tcon;
-struct share_params;
+struct share_params { int service; };
 struct vuid_cache;
 struct files_struct;
 struct vfs_handle_struct;
@@ -107,7 +108,54 @@ extern NTSTATUS make_session_info_from_username(TALLOC_CTX *mem_ctx,
 
 extern NTSTATUS vfs_default_init(TALLOC_CTX *ctx);
 
+extern const char *lp_parm_const_string(int snum, const char *type,
+					 const char *option, const char *def);
+
 #define DEFAULT_TAILSCALE_SOCKET "/var/run/tailscale/tailscaled.sock"
+
+/* --- User map lookup --- */
+
+/*
+ * Look up a tailscale login name in the user map string.
+ * Map format: "tslogin=linuxuser tslogin2=linuxuser2"
+ * Returns talloc'd linux username if found, NULL otherwise.
+ */
+static const char *lookup_user_map(const char *map_str,
+				   const char *login_name,
+				   TALLOC_CTX *mem_ctx)
+{
+	const char *p = map_str;
+	size_t login_len = strlen(login_name);
+
+	while (*p) {
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (!*p)
+			break;
+
+		const char *eq = strchr(p, '=');
+		if (!eq)
+			break;
+
+		const char *val_start = eq + 1;
+		const char *val_end = val_start;
+		while (*val_end && *val_end != ' ' && *val_end != '\t')
+			val_end++;
+
+		size_t key_len = eq - p;
+		if (key_len == login_len &&
+		    strncmp(p, login_name, key_len) == 0) {
+			size_t val_len = val_end - val_start;
+			if (val_len > 0)
+				return talloc_strndup(mem_ctx, val_start,
+						      val_len);
+		}
+
+		p = val_end;
+	}
+
+	return NULL;
+}
 
 /* --- VFS connect implementation --- */
 
@@ -118,6 +166,7 @@ static int tailscale_connect(vfs_handle_struct *handle,
 	const char *ip;
 	const char *socket_path;
 	char *login_name;
+	const char *local_user;
 	struct auth_session_info *old_session_info;
 	struct auth_session_info *new_session_info = NULL;
 	NTSTATUS status;
@@ -146,15 +195,32 @@ static int tailscale_connect(vfs_handle_struct *handle,
 		return -1;
 	}
 
-	syslog(LOG_INFO, "vfs_tailscale: %s -> %s", ip, login_name);
+	/* Apply user map if configured, otherwise use login name as-is */
+	const char *user_map = lp_parm_const_string(
+		conn->params->service, "tailscale", "user map", NULL);
+
+	if (user_map) {
+		local_user = lookup_user_map(user_map, login_name, conn);
+		if (!local_user) {
+			syslog(LOG_WARNING,
+			       "vfs_tailscale: no mapping for %s", login_name);
+			errno = EACCES;
+			return -1;
+		}
+		syslog(LOG_INFO, "vfs_tailscale: %s -> %s (mapped to %s)",
+		       ip, login_name, local_user);
+	} else {
+		local_user = login_name;
+		syslog(LOG_INFO, "vfs_tailscale: %s -> %s", ip, login_name);
+	}
 
 	/* Build a new session_info for the mapped user */
-	status = make_session_info_from_username(conn, login_name, false,
+	status = make_session_info_from_username(conn, local_user, false,
 						 &new_session_info);
 	if (!NT_STATUS_IS_OK(status)) {
 		syslog(LOG_ERR,
 		       "vfs_tailscale: make_session_info_from_username(%s) failed",
-		       login_name);
+		       local_user);
 		errno = EPERM;
 		return -1;
 	}

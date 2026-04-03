@@ -45,13 +45,14 @@
             -I${pkgs.talloc}/include \
             -I${pkgs.curl.dev}/include \
             -I${pkgs.jansson}/include \
-            -L${pkgs.samba}/lib/samba \
+            -L${pkgs.samba}/lib -L${pkgs.samba}/lib/samba \
             -L${pkgs.talloc}/lib \
             -L${pkgs.curl}/lib \
             -L${pkgs.jansson}/lib \
             -lsmbd-base-private-samba \
             -lauth-private-samba \
             -lsamba-sockets-private-samba \
+            -lsmbconf \
             -ltalloc -lcurl -ljansson \
             -o vfs_tailscale.so vfs_tailscale.c whois.c
         '';
@@ -126,6 +127,20 @@
                   "guest ok" = "yes";
                   "vfs objects" = "tailscale:/run/mock-tailscaled.sock";
                 };
+                mappedshare = {
+                  path = "/srv/mapped";
+                  "read only" = "no";
+                  "guest ok" = "yes";
+                  "vfs objects" = "tailscale:/run/mock-tailscaled-mapped.sock";
+                  "tailscale:user map" = "alice@example.com=testuser";
+                };
+                unmappedshare = {
+                  path = "/srv/unmapped";
+                  "read only" = "no";
+                  "guest ok" = "yes";
+                  "vfs objects" = "tailscale:/run/mock-tailscaled-mapped.sock";
+                  "tailscale:user map" = "bob@example.com=testuser";
+                };
               };
             };
 
@@ -141,6 +156,14 @@
               before = [ "samba-smbd.service" ];
               serviceConfig.ExecStart =
                 "${mockTailscaled}/bin/mock_tailscaled /run/mock-tailscaled-unknown.sock 127.0.0.1:0 nosuchuser";
+            };
+
+            # Mock that returns alice@example.com — for user map tests
+            systemd.services.mock-tailscaled-mapped = {
+              wantedBy = [ "multi-user.target" ];
+              before = [ "samba-smbd.service" ];
+              serviceConfig.ExecStart =
+                "${mockTailscaled}/bin/mock_tailscaled /run/mock-tailscaled-mapped.sock 127.0.0.1:0 alice@example.com";
             };
 
             # Mock that only recognizes 10.0.0.1 — 127.0.0.1 gets 404
@@ -159,6 +182,8 @@
             machine.wait_for_file("/run/mock-tailscaled.sock")
             machine.wait_for_unit("mock-tailscaled-unknown.service")
             machine.wait_for_file("/run/mock-tailscaled-unknown.sock")
+            machine.wait_for_unit("mock-tailscaled-mapped.service")
+            machine.wait_for_file("/run/mock-tailscaled-mapped.sock")
             machine.wait_for_unit("mock-tailscaled-nomatch.service")
             machine.wait_for_file("/run/mock-tailscaled-nomatch.sock")
             machine.wait_for_unit("samba-smbd.service")
@@ -167,6 +192,8 @@
             machine.succeed("mkdir -p /srv/denyshare")
             machine.succeed("mkdir -p /srv/nontailscale")
             machine.succeed("mkdir -p /srv/permdenied && chmod 700 /srv/permdenied")
+            machine.succeed("mkdir -p /srv/mapped && chown testuser /srv/mapped")
+            machine.succeed("mkdir -p /srv/unmapped && chown testuser /srv/unmapped")
 
             # Happy path: tailscale user maps to existing local user
             machine.succeed("smbclient //127.0.0.1/testshare -N -c 'ls'")
@@ -184,6 +211,13 @@
 
             # Deny: client IP not recognized by tailscaled (not a tailscale peer)
             machine.fail("smbclient //127.0.0.1/nontailscale -N -c 'ls'")
+
+            # User map: alice@example.com mapped to testuser — should succeed
+            machine.succeed("smbclient //127.0.0.1/mappedshare -N -c 'put /tmp/testfile mapped_file'")
+            machine.succeed("stat -c %U /srv/mapped/mapped_file | grep testuser")
+
+            # User map: alice@example.com not in map (only bob is) — should deny
+            machine.fail("smbclient //127.0.0.1/unmappedshare -N -c 'ls'")
           '';
         };
       };
