@@ -1,5 +1,5 @@
 {
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
   outputs = { self, nixpkgs }:
     let
@@ -29,11 +29,11 @@
         buildInputs = [ pkgs.samba pkgs.talloc pkgs.curl pkgs.jansson ];
 
         buildPhase = ''
-          # Assert Samba version matches vendored VFS structs (4.22.x = VFS interface v50)
+          # Assert Samba version matches vendored VFS structs (4.23.x = VFS interface v51)
           SAMBA_VERSION="${pkgs.samba.version}"
-          if [[ ! "$SAMBA_VERSION" =~ ^4\.22\. ]]; then
+          if [[ ! "$SAMBA_VERSION" =~ ^4\.23\. ]]; then
             echo "ERROR: Samba version mismatch"
-            echo "  Expected: 4.22.x (VFS interface version 50)"
+            echo "  Expected: 4.23.x (VFS interface version 51)"
             echo "  Found:    $SAMBA_VERSION"
             echo "  Update vendored struct declarations in vfs_tailscale.c"
             exit 1

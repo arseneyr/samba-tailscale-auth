@@ -25,14 +25,19 @@
 #include <core/ntstatus.h>
 
 /*
- * Vendored private struct declarations from samba 4.22.6
+ * Vendored private struct declarations from samba 4.23.8
  * (source3/include/vfs.h, source3/smbd/globals.h).
  *
  * Only fields up to the ones we access are defined.  We never allocate
  * these structs — we only chase pointers into smbd's existing copies.
+ *
+ * Verified against samba-4.23.8 source3/include/vfs.h: connection_struct,
+ * vfs_handle_struct and vfs_fn_pointers (98 fn slots, connect_fn/disconnect_fn
+ * first) are byte-identical to 4.22.6; only SMB_VFS_INTERFACE_VERSION changed
+ * (50 -> 51).
  */
 
-#define SMB_VFS_INTERFACE_VERSION 50
+#define SMB_VFS_INTERFACE_VERSION 51
 
 /* Opaque types we only use as pointers */
 struct tsocket_address;
