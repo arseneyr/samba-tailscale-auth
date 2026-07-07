@@ -13,6 +13,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <sys/types.h>
 #include <string.h>
 #include <errno.h>
 #include <syslog.h>
@@ -41,12 +42,31 @@
 
 /* Opaque types we only use as pointers */
 struct tsocket_address;
-struct auth_session_info;
 struct smbXsrv_tcon;
 struct share_params { int service; };
 struct vuid_cache;
 struct files_struct;
 struct vfs_handle_struct;
+struct security_token;
+
+/*
+ * librpc/gen_ndr/security.h — first field only.  We only ever read
+ * ->uid (offset 0) to reject a mapping that resolves to a privileged
+ * account.
+ */
+struct security_unix_token {
+	uid_t uid;
+};
+
+/*
+ * librpc/gen_ndr/auth.h — fields through unix_token.  Verified against
+ * samba-4.23.8 gen_ndr/auth.h: security_token is the first pointer,
+ * unix_token the second.
+ */
+struct auth_session_info {
+	struct security_token *security_token;
+	struct security_unix_token *unix_token;
+};
 
 /* source3/smbd/globals.h — first 2 fields */
 struct smbd_server_connection {
@@ -217,24 +237,29 @@ static int tailscale_connect(vfs_handle_struct *handle,
 		return -1;
 	}
 
-	/* Apply user map if configured, otherwise use login name as-is */
+	/* A user map is mandatory: without it the raw, tailnet-controlled login
+	 * name would be used directly as a Unix username, so a login name that
+	 * collides with a local account (e.g. root) would be impersonated.
+	 * Require an explicit admin-configured mapping instead. */
 	const char *user_map = lp_parm_const_string(
 		conn->params->service, "tailscale", "user map", NULL);
-
-	if (user_map) {
-		local_user = lookup_user_map(user_map, login_name, conn);
-		if (!local_user) {
-			syslog(LOG_WARNING,
-			       "vfs_tailscale: no mapping for %s", login_name);
-			errno = EACCES;
-			return -1;
-		}
-		syslog(LOG_INFO, "vfs_tailscale: %s -> %s (mapped to %s)",
-		       ip, login_name, local_user);
-	} else {
-		local_user = login_name;
-		syslog(LOG_INFO, "vfs_tailscale: %s -> %s", ip, login_name);
+	if (!user_map) {
+		syslog(LOG_ERR,
+		       "vfs_tailscale: denying %s — no 'tailscale:user map' configured for this share",
+		       ip);
+		errno = EACCES;
+		return -1;
 	}
+
+	local_user = lookup_user_map(user_map, login_name, conn);
+	if (!local_user) {
+		syslog(LOG_WARNING,
+		       "vfs_tailscale: no mapping for %s", login_name);
+		errno = EACCES;
+		return -1;
+	}
+	syslog(LOG_INFO, "vfs_tailscale: %s -> %s (mapped to %s)",
+	       ip, login_name, local_user);
 
 	/* Build a new session_info for the mapped user */
 	status = make_session_info_from_username(conn, local_user, false,
@@ -243,6 +268,18 @@ static int tailscale_connect(vfs_handle_struct *handle,
 		syslog(LOG_ERR,
 		       "vfs_tailscale: make_session_info_from_username(%s) failed",
 		       local_user);
+		errno = EPERM;
+		return -1;
+	}
+
+	/* Refuse to impersonate uid 0: a mapping that resolves to root would
+	 * run all file operations with full privilege, defeating the per-user
+	 * Unix permission enforcement this module relies on. */
+	if (new_session_info->unix_token->uid == 0) {
+		syslog(LOG_ERR,
+		       "vfs_tailscale: refusing to map %s to uid 0 (%s)",
+		       login_name, local_user);
+		talloc_free(new_session_info);
 		errno = EPERM;
 		return -1;
 	}

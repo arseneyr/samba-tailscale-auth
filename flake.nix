@@ -108,12 +108,14 @@
                   "read only" = "no";
                   "guest ok" = "yes";
                   "vfs objects" = "tailscale:/run/mock-tailscaled.sock";
+                  "tailscale:user map" = "testuser=testuser";
                 };
                 denyshare = {
                   path = "/srv/denyshare";
                   "read only" = "no";
                   "guest ok" = "yes";
                   "vfs objects" = "tailscale:/run/mock-tailscaled-unknown.sock";
+                  "tailscale:user map" = "nosuchuser=nosuchuser";
                 };
                 nontailscale = {
                   path = "/srv/nontailscale";
@@ -126,6 +128,7 @@
                   "read only" = "no";
                   "guest ok" = "yes";
                   "vfs objects" = "tailscale:/run/mock-tailscaled.sock";
+                  "tailscale:user map" = "testuser=testuser";
                 };
                 mappedshare = {
                   path = "/srv/mapped";
@@ -146,6 +149,21 @@
                   "read only" = "no";
                   "guest ok" = "yes";
                   "vfs objects" = "tailscale:/run/mock-tailscaled-wrongself.sock";
+                };
+                # Valid peer but no user map configured — must be denied.
+                nomapshare = {
+                  path = "/srv/nomap";
+                  "read only" = "no";
+                  "guest ok" = "yes";
+                  "vfs objects" = "tailscale:/run/mock-tailscaled.sock";
+                };
+                # Map resolves testuser to root (uid 0) — must be denied.
+                rootmapshare = {
+                  path = "/srv/rootmap";
+                  "read only" = "no";
+                  "guest ok" = "yes";
+                  "vfs objects" = "tailscale:/run/mock-tailscaled.sock";
+                  "tailscale:user map" = "testuser=root";
                 };
               };
             };
@@ -213,6 +231,8 @@
             machine.succeed("mkdir -p /srv/mapped && chown testuser /srv/mapped")
             machine.succeed("mkdir -p /srv/unmapped && chown testuser /srv/unmapped")
             machine.succeed("mkdir -p /srv/wrongself && chown testuser /srv/wrongself")
+            machine.succeed("mkdir -p /srv/nomap && chown testuser /srv/nomap")
+            machine.succeed("mkdir -p /srv/rootmap && chown testuser /srv/rootmap")
 
             # Happy path: tailscale user maps to existing local user
             machine.succeed("smbclient //127.0.0.1/testshare -N -c 'ls'")
@@ -242,6 +262,12 @@
             # Tailscale IP as 100.64.0.99 — connection did not arrive on the
             # Tailscale interface.
             machine.fail("smbclient //127.0.0.1/wrongselfshare -N -c 'ls'")
+
+            # Deny: valid peer but the share has no tailscale:user map.
+            machine.fail("smbclient //127.0.0.1/nomapshare -N -c 'ls'")
+
+            # Deny: map resolves testuser to root — must refuse uid 0.
+            machine.fail("smbclient //127.0.0.1/rootmapshare -N -c 'ls'")
           '';
         };
       };
