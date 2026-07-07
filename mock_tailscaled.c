@@ -2,11 +2,13 @@
  * Mock tailscaled - a minimal Unix-socket HTTP server that mimics the
  * tailscaled /localapi/v0/whois endpoint for integration testing.
  *
- * Usage: mock_tailscaled <socket_path> <expected_addr> <login_name>
+ * Usage: mock_tailscaled <socket_path> <expected_addr> <login_name> [self_ip]
  *
  * Listens on <socket_path>, accepts connections, reads HTTP requests.
- * If the request contains "addr=<expected_addr>", returns a 200 with a
- * valid whois JSON response using <login_name>. Otherwise returns 404.
+ * For /localapi/v0/status requests, returns a 200 reporting [self_ip] as this
+ * node's Tailscale IP (default 127.0.0.1). For whois requests, if the request
+ * contains "addr=<expected_addr>", returns a 200 with a valid whois JSON
+ * response using <login_name>; otherwise returns 404.
  */
 
 #include <stdio.h>
@@ -27,7 +29,7 @@ static void handle_signal(int sig)
 }
 
 static void handle_client(int client_fd, const char *expected_addr,
-			   const char *login_name)
+			   const char *login_name, const char *self_ip)
 {
 	char reqbuf[4096];
 	ssize_t n = read(client_fd, reqbuf, sizeof(reqbuf) - 1);
@@ -38,6 +40,19 @@ static void handle_client(int client_fd, const char *expected_addr,
 	reqbuf[n] = '\0';
 
 	fprintf(stderr, "mock_tailscaled: received request: %.200s\n", reqbuf);
+
+	/* Status request: report self_ip as this node's Tailscale IP. */
+	if (strstr(reqbuf, "/localapi/v0/status")) {
+		char status_response[512];
+		snprintf(status_response, sizeof(status_response),
+			 "HTTP/1.1 200 OK\r\n"
+			 "Content-Type: application/json\r\n"
+			 "\r\n"
+			 "{\"Self\":{\"TailscaleIPs\":[\"%s\"]}}", self_ip);
+		(void)write(client_fd, status_response, strlen(status_response));
+		close(client_fd);
+		return;
+	}
 
 	/* Check if the request contains addr=<expected_addr> */
 	char needle[256];
@@ -69,9 +84,9 @@ static void handle_client(int client_fd, const char *expected_addr,
 
 int main(int argc, char **argv)
 {
-	if (argc != 4) {
+	if (argc != 4 && argc != 5) {
 		fprintf(stderr,
-			"Usage: %s <socket_path> <expected_addr> <login_name>\n",
+			"Usage: %s <socket_path> <expected_addr> <login_name> [self_ip]\n",
 			argv[0]);
 		return 1;
 	}
@@ -79,6 +94,7 @@ int main(int argc, char **argv)
 	const char *socket_path = argv[1];
 	const char *expected_addr = argv[2];
 	const char *login_name = argv[3];
+	const char *self_ip = (argc == 5) ? argv[4] : "127.0.0.1";
 
 	signal(SIGTERM, handle_signal);
 	signal(SIGINT, handle_signal);
@@ -121,7 +137,7 @@ int main(int argc, char **argv)
 		int client_fd = accept(listen_fd, NULL, NULL);
 		if (client_fd < 0)
 			continue;
-		handle_client(client_fd, expected_addr, login_name);
+		handle_client(client_fd, expected_addr, login_name, self_ip);
 	}
 
 	close(listen_fd);

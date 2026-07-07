@@ -225,6 +225,58 @@ static void test_connection_failure(void)
 	printf("  PASS: connection failure\n");
 }
 
+static const char *STATUS_RESPONSE =
+	"HTTP/1.1 200 OK\r\n"
+	"Content-Type: application/json\r\n"
+	"\r\n"
+	"{\"Self\":{\"TailscaleIPs\":"
+	"[\"100.64.1.2\",\"fd7a:115c:a1e0::1\"]}}";
+
+static bool run_local_ip_ok(const char *local_ip)
+{
+	struct mock_server srv;
+	mock_server_init(&srv, STATUS_RESPONSE);
+
+	pthread_t tid;
+	pthread_create(&tid, NULL, mock_server_thread, &srv);
+
+	bool ok = tailscale_local_ip_ok(local_ip, srv.socket_path);
+
+	pthread_join(tid, NULL);
+	mock_server_cleanup(&srv);
+	return ok;
+}
+
+static void test_local_ip_match(void)
+{
+	ASSERT(run_local_ip_ok("100.64.1.2"),
+	       "expected local IPv4 to match Self.TailscaleIPs");
+	printf("  PASS: local IP match\n");
+}
+
+static void test_local_ip_no_match(void)
+{
+	ASSERT(!run_local_ip_ok("127.0.0.1"),
+	       "expected non-Tailscale local IP to be rejected");
+	printf("  PASS: local IP no match\n");
+}
+
+static void test_local_ip_ipv6_normalized(void)
+{
+	/* Same address as fd7a:115c:a1e0::1, written uncompressed. */
+	ASSERT(run_local_ip_ok("fd7a:115c:a1e0:0:0:0:0:1"),
+	       "expected IPv6 match despite differing zero-compression");
+	printf("  PASS: local IP IPv6 normalized match\n");
+}
+
+static void test_local_ip_connection_failure(void)
+{
+	ASSERT(!tailscale_local_ip_ok("100.64.1.2",
+				      "/tmp/nonexistent_socket.sock"),
+	       "expected false on connection failure");
+	printf("  PASS: local IP connection failure\n");
+}
+
 int main(void)
 {
 	printf("test_whois:\n");
@@ -234,6 +286,10 @@ int main(void)
 	test_http_404();
 	test_oversized_response();
 	test_connection_failure();
+	test_local_ip_match();
+	test_local_ip_no_match();
+	test_local_ip_ipv6_normalized();
+	test_local_ip_connection_failure();
 	printf("All tests passed.\n");
 	return 0;
 }

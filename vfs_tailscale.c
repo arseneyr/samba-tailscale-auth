@@ -169,6 +169,7 @@ static int tailscale_connect(vfs_handle_struct *handle,
 {
 	connection_struct *conn = handle->conn;
 	const char *ip;
+	const char *local_ip;
 	const char *socket_path;
 	char *login_name;
 	const char *local_user;
@@ -176,6 +177,27 @@ static int tailscale_connect(vfs_handle_struct *handle,
 	struct auth_session_info *new_session_info = NULL;
 	NTSTATUS status;
 	int ret;
+
+	/* Socket path from module parameter, or default */
+	socket_path = handle->param;
+	if (!socket_path || !*socket_path)
+		socket_path = DEFAULT_TAILSCALE_SOCKET;
+
+	/* Verify the connection actually arrived on our Tailscale interface:
+	 * the address the client connected *to* must be one of this node's own
+	 * Tailscale IPs. A whois lookup alone is not sufficient — tailscaled
+	 * resolves a peer IP to an identity regardless of the interface the
+	 * packet arrived on, so a spoofed peer source address on another
+	 * interface could otherwise be accepted. */
+	local_ip = tsocket_address_inet_addr_string(conn->sconn->local_address,
+						    conn);
+	if (!local_ip || !tailscale_local_ip_ok(local_ip, socket_path)) {
+		syslog(LOG_WARNING,
+		       "vfs_tailscale: denying connection to non-tailscale local address %s",
+		       local_ip ? local_ip : "(unknown)");
+		errno = EACCES;
+		return -1;
+	}
 
 	/* Get client IP */
 	ip = tsocket_address_inet_addr_string(conn->sconn->remote_address,
@@ -185,11 +207,6 @@ static int tailscale_connect(vfs_handle_struct *handle,
 		errno = EACCES;
 		return -1;
 	}
-
-	/* Socket path from module parameter, or default */
-	socket_path = handle->param;
-	if (!socket_path || !*socket_path)
-		socket_path = DEFAULT_TAILSCALE_SOCKET;
 
 	/* Query tailscaled for the identity of this peer */
 	login_name = tailscale_whois(ip, socket_path, conn);

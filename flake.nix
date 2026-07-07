@@ -141,6 +141,12 @@
                   "vfs objects" = "tailscale:/run/mock-tailscaled-mapped.sock";
                   "tailscale:user map" = "bob@example.com=testuser";
                 };
+                wrongselfshare = {
+                  path = "/srv/wrongself";
+                  "read only" = "no";
+                  "guest ok" = "yes";
+                  "vfs objects" = "tailscale:/run/mock-tailscaled-wrongself.sock";
+                };
               };
             };
 
@@ -174,6 +180,16 @@
                 "${mockTailscaled}/bin/mock_tailscaled /run/mock-tailscaled-nomatch.sock 10.0.0.1:0 testuser";
             };
 
+            # Mock whose /status reports a self IP (100.64.0.99) that is NOT the
+            # 127.0.0.1 the client connects to — exercises the local-address
+            # (Tailscale interface) check, which must deny.
+            systemd.services.mock-tailscaled-wrongself = {
+              wantedBy = [ "multi-user.target" ];
+              before = [ "samba-smbd.service" ];
+              serviceConfig.ExecStart =
+                "${mockTailscaled}/bin/mock_tailscaled /run/mock-tailscaled-wrongself.sock 127.0.0.1:0 testuser 100.64.0.99";
+            };
+
             environment.systemPackages = [ pkgs.samba ];
           };
 
@@ -186,6 +202,8 @@
             machine.wait_for_file("/run/mock-tailscaled-mapped.sock")
             machine.wait_for_unit("mock-tailscaled-nomatch.service")
             machine.wait_for_file("/run/mock-tailscaled-nomatch.sock")
+            machine.wait_for_unit("mock-tailscaled-wrongself.service")
+            machine.wait_for_file("/run/mock-tailscaled-wrongself.sock")
             machine.wait_for_unit("samba-smbd.service")
 
             machine.succeed("mkdir -p /srv/share && chown testuser /srv/share")
@@ -194,6 +212,7 @@
             machine.succeed("mkdir -p /srv/permdenied && chmod 700 /srv/permdenied")
             machine.succeed("mkdir -p /srv/mapped && chown testuser /srv/mapped")
             machine.succeed("mkdir -p /srv/unmapped && chown testuser /srv/unmapped")
+            machine.succeed("mkdir -p /srv/wrongself && chown testuser /srv/wrongself")
 
             # Happy path: tailscale user maps to existing local user
             machine.succeed("smbclient //127.0.0.1/testshare -N -c 'ls'")
@@ -218,6 +237,11 @@
 
             # User map: alice@example.com not in map (only bob is) — should deny
             machine.fail("smbclient //127.0.0.1/unmappedshare -N -c 'ls'")
+
+            # Deny: client connects to 127.0.0.1 but tailscaled reports its
+            # Tailscale IP as 100.64.0.99 — connection did not arrive on the
+            # Tailscale interface.
+            machine.fail("smbclient //127.0.0.1/wrongselfshare -N -c 'ls'")
           '';
         };
       };
