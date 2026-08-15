@@ -157,6 +157,33 @@
                   "guest ok" = "yes";
                   "vfs objects" = "tailscale:/run/mock-tailscaled.sock";
                 };
+                # Tagged node: the peer's login name is the shared tag
+                # namespace, and the map keys off the tag instead.
+                tagshare = {
+                  path = "/srv/tag";
+                  "read only" = "no";
+                  "guest ok" = "yes";
+                  "vfs objects" = "tailscale:/run/mock-tailscaled-tagged.sock";
+                  "tailscale:user map" = "tag:infra=testuser";
+                };
+                # Tagged node whose tag is absent from the map — must be
+                # denied, even though the node carries some other tag.
+                wrongtagshare = {
+                  path = "/srv/wrongtag";
+                  "read only" = "no";
+                  "guest ok" = "yes";
+                  "vfs objects" = "tailscale:/run/mock-tailscaled-tagged.sock";
+                  "tailscale:user map" = "tag:other=testuser";
+                };
+                # A tagged node still matches on its login name when no tag
+                # key is present — keeps the pre-tag behaviour working.
+                tagloginshare = {
+                  path = "/srv/taglogin";
+                  "read only" = "no";
+                  "guest ok" = "yes";
+                  "vfs objects" = "tailscale:/run/mock-tailscaled-tagged.sock";
+                  "tailscale:user map" = "tagged-devices=testuser";
+                };
                 # Map resolves testuser to root (uid 0) — must be denied.
                 rootmapshare = {
                   path = "/srv/rootmap";
@@ -188,6 +215,15 @@
               before = [ "samba-smbd.service" ];
               serviceConfig.ExecStart =
                 "${mockTailscaled}/bin/mock_tailscaled /run/mock-tailscaled-mapped.sock 127.0.0.1:0 alice@example.com";
+            };
+
+            # Mock for a tagged node: login name is the shared tag namespace,
+            # with the real tag carried in Node.Tags.
+            systemd.services.mock-tailscaled-tagged = {
+              wantedBy = [ "multi-user.target" ];
+              before = [ "samba-smbd.service" ];
+              serviceConfig.ExecStart =
+                "${mockTailscaled}/bin/mock_tailscaled /run/mock-tailscaled-tagged.sock 127.0.0.1:0 tagged-devices 127.0.0.1 tag:infra";
             };
 
             # Mock that only recognizes 10.0.0.1 — 127.0.0.1 gets 404
@@ -222,6 +258,8 @@
             machine.wait_for_file("/run/mock-tailscaled-nomatch.sock")
             machine.wait_for_unit("mock-tailscaled-wrongself.service")
             machine.wait_for_file("/run/mock-tailscaled-wrongself.sock")
+            machine.wait_for_unit("mock-tailscaled-tagged.service")
+            machine.wait_for_file("/run/mock-tailscaled-tagged.sock")
             machine.wait_for_unit("samba-smbd.service")
 
             machine.succeed("mkdir -p /srv/share && chown testuser /srv/share")
@@ -233,6 +271,9 @@
             machine.succeed("mkdir -p /srv/wrongself && chown testuser /srv/wrongself")
             machine.succeed("mkdir -p /srv/nomap && chown testuser /srv/nomap")
             machine.succeed("mkdir -p /srv/rootmap && chown testuser /srv/rootmap")
+            machine.succeed("mkdir -p /srv/tag && chown testuser /srv/tag")
+            machine.succeed("mkdir -p /srv/wrongtag && chown testuser /srv/wrongtag")
+            machine.succeed("mkdir -p /srv/taglogin && chown testuser /srv/taglogin")
 
             # Happy path: tailscale user maps to existing local user
             machine.succeed("smbclient //127.0.0.1/testshare -N -c 'ls'")
@@ -268,6 +309,17 @@
 
             # Deny: map resolves testuser to root — must refuse uid 0.
             machine.fail("smbclient //127.0.0.1/rootmapshare -N -c 'ls'")
+
+            # Tag map: tagged node matches on tag:infra — should succeed.
+            machine.succeed("smbclient //127.0.0.1/tagshare -N -c 'put /tmp/testfile tag_file'")
+            machine.succeed("stat -c %U /srv/tag/tag_file | grep testuser")
+
+            # Deny: node carries tag:infra, but only tag:other is mapped.
+            machine.fail("smbclient //127.0.0.1/wrongtagshare -N -c 'ls'")
+
+            # A tagged node still matches on its login name when the map has
+            # no tag key.
+            machine.succeed("smbclient //127.0.0.1/tagloginshare -N -c 'ls'")
           '';
         };
       };

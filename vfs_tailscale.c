@@ -141,16 +141,17 @@ extern const char *lp_parm_const_string(int snum, const char *type,
 /* --- User map lookup --- */
 
 /*
- * Look up a tailscale login name in the user map string.
- * Map format: "tslogin=linuxuser tslogin2=linuxuser2"
+ * Look up an identity key in the user map string. The key is either a
+ * tailscale login name or a tag ("tag:infra").
+ * Map format: "key=linuxuser key2=linuxuser2"
  * Returns talloc'd linux username if found, NULL otherwise.
  */
 static const char *lookup_user_map(const char *map_str,
-				   const char *login_name,
+				   const char *key,
 				   TALLOC_CTX *mem_ctx)
 {
 	const char *p = map_str;
-	size_t login_len = strlen(login_name);
+	size_t key_wanted_len = strlen(key);
 
 	while (*p) {
 		while (*p == ' ' || *p == '\t')
@@ -168,8 +169,8 @@ static const char *lookup_user_map(const char *map_str,
 			val_end++;
 
 		size_t key_len = eq - p;
-		if (key_len == login_len &&
-		    strncmp(p, login_name, key_len) == 0) {
+		if (key_len == key_wanted_len &&
+		    strncmp(p, key, key_len) == 0) {
 			size_t val_len = val_end - val_start;
 			if (val_len > 0)
 				return talloc_strndup(mem_ctx, val_start,
@@ -182,6 +183,60 @@ static const char *lookup_user_map(const char *map_str,
 	return NULL;
 }
 
+/*
+ * Resolve a peer identity to a local user via the map.
+ *
+ * Tags are tried before the login name: every tagged node in the tailnet
+ * shares one login name (the tag namespace, "tagged-devices" on headscale),
+ * so a "tag:foo" key is both more specific and the only way to tell one
+ * tagged node's access from another's. On success *matched_key points at the
+ * map key that hit, for logging.
+ */
+static const char *resolve_local_user(const char *user_map,
+				      const struct tailscale_identity *id,
+				      const char **matched_key,
+				      TALLOC_CTX *mem_ctx)
+{
+	const char *local_user;
+	size_t i;
+
+	for (i = 0; id->tags && id->tags[i]; i++) {
+		local_user = lookup_user_map(user_map, id->tags[i], mem_ctx);
+		if (local_user) {
+			*matched_key = id->tags[i];
+			return local_user;
+		}
+	}
+
+	if (id->login_name) {
+		local_user = lookup_user_map(user_map, id->login_name, mem_ctx);
+		if (local_user) {
+			*matched_key = id->login_name;
+			return local_user;
+		}
+	}
+
+	return NULL;
+}
+
+/* Render an identity for a log line, e.g. `tagged-devices [tag:infra]`. */
+static const char *describe_identity(const struct tailscale_identity *id,
+				     TALLOC_CTX *mem_ctx)
+{
+	char *desc = talloc_strdup(mem_ctx,
+				   id->login_name ? id->login_name : "(no user)");
+	size_t i;
+
+	for (i = 0; desc && id->tags && id->tags[i]; i++)
+		desc = talloc_asprintf_append(desc, "%s%s",
+					      i == 0 ? " [" : ",",
+					      id->tags[i]);
+	if (desc && id->tags)
+		desc = talloc_strdup_append(desc, "]");
+
+	return desc ? desc : "(unknown)";
+}
+
 /* --- VFS connect implementation --- */
 
 static int tailscale_connect(vfs_handle_struct *handle,
@@ -191,7 +246,8 @@ static int tailscale_connect(vfs_handle_struct *handle,
 	const char *ip;
 	const char *local_ip;
 	const char *socket_path;
-	char *login_name;
+	struct tailscale_identity identity;
+	const char *matched_key = NULL;
 	const char *local_user;
 	struct auth_session_info *old_session_info;
 	struct auth_session_info *new_session_info = NULL;
@@ -229,8 +285,7 @@ static int tailscale_connect(vfs_handle_struct *handle,
 	}
 
 	/* Query tailscaled for the identity of this peer */
-	login_name = tailscale_whois(ip, socket_path, conn);
-	if (!login_name) {
+	if (!tailscale_whois(ip, socket_path, conn, &identity)) {
 		syslog(LOG_WARNING,
 		       "vfs_tailscale: denying %s — not a tailscale peer", ip);
 		errno = EACCES;
@@ -251,15 +306,15 @@ static int tailscale_connect(vfs_handle_struct *handle,
 		return -1;
 	}
 
-	local_user = lookup_user_map(user_map, login_name, conn);
+	local_user = resolve_local_user(user_map, &identity, &matched_key, conn);
 	if (!local_user) {
-		syslog(LOG_WARNING,
-		       "vfs_tailscale: no mapping for %s", login_name);
+		syslog(LOG_WARNING, "vfs_tailscale: no mapping for %s",
+		       describe_identity(&identity, conn));
 		errno = EACCES;
 		return -1;
 	}
-	syslog(LOG_INFO, "vfs_tailscale: %s -> %s (mapped to %s)",
-	       ip, login_name, local_user);
+	syslog(LOG_INFO, "vfs_tailscale: %s -> %s (matched %s, mapped to %s)",
+	       ip, describe_identity(&identity, conn), matched_key, local_user);
 
 	/* Build a new session_info for the mapped user */
 	status = make_session_info_from_username(conn, local_user, false,
@@ -278,7 +333,7 @@ static int tailscale_connect(vfs_handle_struct *handle,
 	if (new_session_info->unix_token->uid == 0) {
 		syslog(LOG_ERR,
 		       "vfs_tailscale: refusing to map %s to uid 0 (%s)",
-		       login_name, local_user);
+		       matched_key, local_user);
 		talloc_free(new_session_info);
 		errno = EPERM;
 		return -1;

@@ -2,13 +2,14 @@
  * Mock tailscaled - a minimal Unix-socket HTTP server that mimics the
  * tailscaled /localapi/v0/whois endpoint for integration testing.
  *
- * Usage: mock_tailscaled <socket_path> <expected_addr> <login_name> [self_ip]
+ * Usage: mock_tailscaled <socket_path> <expected_addr> <login_name> [self_ip] [tag...]
  *
  * Listens on <socket_path>, accepts connections, reads HTTP requests.
  * For /localapi/v0/status requests, returns a 200 reporting [self_ip] as this
  * node's Tailscale IP (default 127.0.0.1). For whois requests, if the request
  * contains "addr=<expected_addr>", returns a 200 with a valid whois JSON
- * response using <login_name>; otherwise returns 404.
+ * response using <login_name> and any [tag...] arguments as Node.Tags;
+ * otherwise returns 404.
  */
 
 #include <stdio.h>
@@ -28,8 +29,31 @@ static void handle_signal(int sig)
 	running = 0;
 }
 
+/*
+ * Render the tag arguments as a Node object: `"Node":{"Tags":[...]},` when
+ * tags were given, or the empty string when they weren't.
+ */
+static void format_node(char *out, size_t outlen, char **tags, int ntags)
+{
+	size_t used;
+	int i;
+
+	if (ntags == 0) {
+		out[0] = '\0';
+		return;
+	}
+
+	used = snprintf(out, outlen, "\"Node\":{\"Tags\":[");
+	for (i = 0; i < ntags && used < outlen; i++)
+		used += snprintf(out + used, outlen - used, "%s\"%s\"",
+				 i ? "," : "", tags[i]);
+	if (used < outlen)
+		snprintf(out + used, outlen - used, "]},");
+}
+
 static void handle_client(int client_fd, const char *expected_addr,
-			   const char *login_name, const char *self_ip)
+			   const char *login_name, const char *self_ip,
+			   char **tags, int ntags)
 {
 	char reqbuf[4096];
 	ssize_t n = read(client_fd, reqbuf, sizeof(reqbuf) - 1);
@@ -62,12 +86,14 @@ static void handle_client(int client_fd, const char *expected_addr,
 	char ok_response[1024];
 
 	if (strstr(reqbuf, needle)) {
+		char node[512];
+		format_node(node, sizeof(node), tags, ntags);
 		snprintf(ok_response, sizeof(ok_response),
 			 "HTTP/1.1 200 OK\r\n"
 			 "Content-Type: application/json\r\n"
 			 "\r\n"
-			 "{\"UserProfile\":{\"LoginName\":\"%s\",\"ID\":1}}",
-			 login_name);
+			 "{%s\"UserProfile\":{\"LoginName\":\"%s\",\"ID\":1}}",
+			 node, login_name);
 		response = ok_response;
 	} else {
 		fprintf(stderr, "mock_tailscaled: expected '%s' in request, "
@@ -84,9 +110,9 @@ static void handle_client(int client_fd, const char *expected_addr,
 
 int main(int argc, char **argv)
 {
-	if (argc != 4 && argc != 5) {
+	if (argc < 4) {
 		fprintf(stderr,
-			"Usage: %s <socket_path> <expected_addr> <login_name> [self_ip]\n",
+			"Usage: %s <socket_path> <expected_addr> <login_name> [self_ip] [tag...]\n",
 			argv[0]);
 		return 1;
 	}
@@ -94,7 +120,9 @@ int main(int argc, char **argv)
 	const char *socket_path = argv[1];
 	const char *expected_addr = argv[2];
 	const char *login_name = argv[3];
-	const char *self_ip = (argc == 5) ? argv[4] : "127.0.0.1";
+	const char *self_ip = (argc >= 5) ? argv[4] : "127.0.0.1";
+	char **tags = (argc > 5) ? &argv[5] : NULL;
+	int ntags = (argc > 5) ? argc - 5 : 0;
 
 	signal(SIGTERM, handle_signal);
 	signal(SIGINT, handle_signal);
@@ -137,7 +165,8 @@ int main(int argc, char **argv)
 		int client_fd = accept(listen_fd, NULL, NULL);
 		if (client_fd < 0)
 			continue;
-		handle_client(client_fd, expected_addr, login_name, self_ip);
+		handle_client(client_fd, expected_addr, login_name, self_ip,
+			      tags, ntags);
 	}
 
 	close(listen_fd);

@@ -30,23 +30,64 @@ size_t curl_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
 	return total;
 }
 
-char *tailscale_whois(const char *ip, const char *socket_path,
-		      TALLOC_CTX *mem_ctx)
+/*
+ * Extract Node.Tags as a NULL-terminated array of talloc'd strings. Returns
+ * NULL if the node carries no tags, or if none of the entries are strings.
+ */
+static const char **parse_tags(json_t *root, TALLOC_CTX *mem_ctx)
+{
+	json_t *node = json_object_get(root, "Node");
+	json_t *jtags = node ? json_object_get(node, "Tags") : NULL;
+	const char **tags;
+	size_t count = 0;
+	size_t i;
+	json_t *val;
+
+	if (!json_is_array(jtags) || json_array_size(jtags) == 0)
+		return NULL;
+
+	tags = talloc_zero_array(mem_ctx, const char *,
+				 json_array_size(jtags) + 1);
+	if (!tags)
+		return NULL;
+
+	json_array_foreach(jtags, i, val) {
+		if (!json_is_string(val))
+			continue;
+		tags[count] = talloc_strdup(tags, json_string_value(val));
+		if (!tags[count]) {
+			talloc_free(tags);
+			return NULL;
+		}
+		count++;
+	}
+
+	if (count == 0) {
+		talloc_free(tags);
+		return NULL;
+	}
+	return tags;
+}
+
+bool tailscale_whois(const char *ip, const char *socket_path,
+		     TALLOC_CTX *mem_ctx, struct tailscale_identity *out)
 {
 	CURL *curl;
 	char url[512];
 	struct curl_buf buf = { .data = NULL, .len = 0 };
-	char *login_name = NULL;
+	struct tailscale_identity identity = { .login_name = NULL,
+					       .tags = NULL };
+	bool found = false;
 	long http_code = 0;
 
 	curl = curl_easy_init();
 	if (!curl)
-		return NULL;
+		return false;
 
 	char *escaped_ip = curl_easy_escape(curl, ip, 0);
 	if (!escaped_ip) {
 		curl_easy_cleanup(curl);
-		return NULL;
+		return false;
 	}
 	snprintf(url, sizeof(url),
 		 "http://local-tailscaled.sock/localapi/v0/whois?addr=%s:0",
@@ -67,31 +108,32 @@ char *tailscale_whois(const char *ip, const char *socket_path,
 	if (http_code != 200 || !buf.data)
 		goto out;
 
-	/* Parse JSON: extract UserProfile.LoginName */
+	/* Parse JSON: extract UserProfile.LoginName and Node.Tags */
 	json_error_t jerr;
 	json_t *root = json_loads(buf.data, 0, &jerr);
 	if (!root)
 		goto out;
 
 	json_t *profile = json_object_get(root, "UserProfile");
-	if (!profile) {
-		json_decref(root);
-		goto out;
-	}
+	json_t *jname = profile ? json_object_get(profile, "LoginName") : NULL;
+	if (jname && json_is_string(jname))
+		identity.login_name = talloc_strdup(mem_ctx,
+						    json_string_value(jname));
 
-	json_t *jname = json_object_get(profile, "LoginName");
-	if (!jname || !json_is_string(jname)) {
-		json_decref(root);
-		goto out;
-	}
-
-	login_name = talloc_strdup(mem_ctx, json_string_value(jname));
+	identity.tags = parse_tags(root, mem_ctx);
 	json_decref(root);
+
+	/* Either half alone is a usable identity; neither means the response
+	 * told us nothing about who the peer is. */
+	if (identity.login_name || identity.tags) {
+		*out = identity;
+		found = true;
+	}
 
 out:
 	curl_easy_cleanup(curl);
 	free(buf.data);
-	return login_name;
+	return found;
 }
 
 /*

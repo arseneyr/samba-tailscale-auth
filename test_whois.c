@@ -79,14 +79,17 @@ static void test_happy_path(void)
 	pthread_create(&tid, NULL, mock_server_thread, &srv);
 
 	TALLOC_CTX *ctx = talloc_new(NULL);
-	char *result = tailscale_whois("100.64.1.1", srv.socket_path, ctx);
+	struct tailscale_identity id;
+	bool ok = tailscale_whois("100.64.1.1", srv.socket_path, ctx, &id);
 
 	pthread_join(tid, NULL);
 	mock_server_cleanup(&srv);
 
-	ASSERT(result != NULL, "expected non-NULL login name");
-	ASSERT(strcmp(result, "user@example.com") == 0,
+	ASSERT(ok, "expected the peer to resolve");
+	ASSERT(id.login_name != NULL, "expected non-NULL login name");
+	ASSERT(strcmp(id.login_name, "user@example.com") == 0,
 	       "expected user@example.com");
+	ASSERT(id.tags == NULL, "expected no tags for an untagged node");
 
 	talloc_free(ctx);
 	printf("  PASS: happy path\n");
@@ -107,12 +110,13 @@ static void test_missing_user_profile(void)
 	pthread_create(&tid, NULL, mock_server_thread, &srv);
 
 	TALLOC_CTX *ctx = talloc_new(NULL);
-	char *result = tailscale_whois("100.64.1.2", srv.socket_path, ctx);
+	struct tailscale_identity id;
+	bool ok = tailscale_whois("100.64.1.2", srv.socket_path, ctx, &id);
 
 	pthread_join(tid, NULL);
 	mock_server_cleanup(&srv);
 
-	ASSERT(result == NULL, "expected NULL when UserProfile missing");
+	ASSERT(!ok, "expected failure when UserProfile missing");
 
 	talloc_free(ctx);
 	printf("  PASS: missing UserProfile\n");
@@ -133,15 +137,116 @@ static void test_missing_login_name(void)
 	pthread_create(&tid, NULL, mock_server_thread, &srv);
 
 	TALLOC_CTX *ctx = talloc_new(NULL);
-	char *result = tailscale_whois("100.64.1.3", srv.socket_path, ctx);
+	struct tailscale_identity id;
+	bool ok = tailscale_whois("100.64.1.3", srv.socket_path, ctx, &id);
 
 	pthread_join(tid, NULL);
 	mock_server_cleanup(&srv);
 
-	ASSERT(result == NULL, "expected NULL when LoginName missing");
+	ASSERT(!ok, "expected failure when LoginName missing");
 
 	talloc_free(ctx);
 	printf("  PASS: missing LoginName\n");
+}
+
+/*
+ * A tagged node: the control plane reports the shared tag namespace as the
+ * login name and the real tags under Node.Tags.
+ */
+static void test_tagged_node(void)
+{
+	const char *response =
+		"HTTP/1.1 200 OK\r\n"
+		"Content-Type: application/json\r\n"
+		"\r\n"
+		"{\"Node\":{\"ID\":1,\"Tags\":[\"tag:infra\",\"tag:server\"]},"
+		"\"UserProfile\":{\"LoginName\":\"tagged-devices\"}}";
+
+	struct mock_server srv;
+	mock_server_init(&srv, response);
+
+	pthread_t tid;
+	pthread_create(&tid, NULL, mock_server_thread, &srv);
+
+	TALLOC_CTX *ctx = talloc_new(NULL);
+	struct tailscale_identity id;
+	bool ok = tailscale_whois("100.64.1.7", srv.socket_path, ctx, &id);
+
+	pthread_join(tid, NULL);
+	mock_server_cleanup(&srv);
+
+	ASSERT(ok, "expected the tagged peer to resolve");
+	ASSERT(id.login_name != NULL &&
+	       strcmp(id.login_name, "tagged-devices") == 0,
+	       "expected tagged-devices login name");
+	ASSERT(id.tags != NULL, "expected tags");
+	ASSERT(strcmp(id.tags[0], "tag:infra") == 0, "expected tag:infra");
+	ASSERT(strcmp(id.tags[1], "tag:server") == 0, "expected tag:server");
+	ASSERT(id.tags[2] == NULL, "expected NULL-terminated tag array");
+
+	talloc_free(ctx);
+	printf("  PASS: tagged node\n");
+}
+
+/* Tags alone are a usable identity, even with no UserProfile at all. */
+static void test_tags_without_user_profile(void)
+{
+	const char *response =
+		"HTTP/1.1 200 OK\r\n"
+		"Content-Type: application/json\r\n"
+		"\r\n"
+		"{\"Node\":{\"ID\":1,\"Tags\":[\"tag:infra\"]}}";
+
+	struct mock_server srv;
+	mock_server_init(&srv, response);
+
+	pthread_t tid;
+	pthread_create(&tid, NULL, mock_server_thread, &srv);
+
+	TALLOC_CTX *ctx = talloc_new(NULL);
+	struct tailscale_identity id;
+	bool ok = tailscale_whois("100.64.1.8", srv.socket_path, ctx, &id);
+
+	pthread_join(tid, NULL);
+	mock_server_cleanup(&srv);
+
+	ASSERT(ok, "expected tags alone to resolve");
+	ASSERT(id.login_name == NULL, "expected no login name");
+	ASSERT(id.tags != NULL && strcmp(id.tags[0], "tag:infra") == 0,
+	       "expected tag:infra");
+
+	talloc_free(ctx);
+	printf("  PASS: tags without UserProfile\n");
+}
+
+/* An empty Tags array must read the same as no tags at all. */
+static void test_empty_tags(void)
+{
+	const char *response =
+		"HTTP/1.1 200 OK\r\n"
+		"Content-Type: application/json\r\n"
+		"\r\n"
+		"{\"Node\":{\"ID\":1,\"Tags\":[]},"
+		"\"UserProfile\":{\"LoginName\":\"user@example.com\"}}";
+
+	struct mock_server srv;
+	mock_server_init(&srv, response);
+
+	pthread_t tid;
+	pthread_create(&tid, NULL, mock_server_thread, &srv);
+
+	TALLOC_CTX *ctx = talloc_new(NULL);
+	struct tailscale_identity id;
+	bool ok = tailscale_whois("100.64.1.9", srv.socket_path, ctx, &id);
+
+	pthread_join(tid, NULL);
+	mock_server_cleanup(&srv);
+
+	ASSERT(ok, "expected the peer to resolve");
+	ASSERT(id.tags == NULL, "expected empty Tags to read as no tags");
+
+	talloc_free(ctx);
+	printf("  PASS: empty tags\n");
 }
 
 static void test_http_404(void)
@@ -159,12 +264,13 @@ static void test_http_404(void)
 	pthread_create(&tid, NULL, mock_server_thread, &srv);
 
 	TALLOC_CTX *ctx = talloc_new(NULL);
-	char *result = tailscale_whois("100.64.1.4", srv.socket_path, ctx);
+	struct tailscale_identity id;
+	bool ok = tailscale_whois("100.64.1.4", srv.socket_path, ctx, &id);
 
 	pthread_join(tid, NULL);
 	mock_server_cleanup(&srv);
 
-	ASSERT(result == NULL, "expected NULL on HTTP 404");
+	ASSERT(!ok, "expected failure on HTTP 404");
 
 	talloc_free(ctx);
 	printf("  PASS: HTTP 404\n");
@@ -202,12 +308,13 @@ static void test_oversized_response(void)
 	pthread_create(&tid, NULL, mock_server_stream_large, &srv);
 
 	TALLOC_CTX *ctx = talloc_new(NULL);
-	char *result = tailscale_whois("100.64.1.6", srv.socket_path, ctx);
+	struct tailscale_identity id;
+	bool ok = tailscale_whois("100.64.1.6", srv.socket_path, ctx, &id);
 
 	pthread_join(tid, NULL);
 	mock_server_cleanup(&srv);
 
-	ASSERT(result == NULL, "expected NULL on oversized response");
+	ASSERT(!ok, "expected failure on oversized response");
 
 	talloc_free(ctx);
 	printf("  PASS: oversized response\n");
@@ -216,10 +323,11 @@ static void test_oversized_response(void)
 static void test_connection_failure(void)
 {
 	TALLOC_CTX *ctx = talloc_new(NULL);
-	char *result = tailscale_whois("100.64.1.5",
-				       "/tmp/nonexistent_socket.sock", ctx);
+	struct tailscale_identity id;
+	bool ok = tailscale_whois("100.64.1.5",
+				  "/tmp/nonexistent_socket.sock", ctx, &id);
 
-	ASSERT(result == NULL, "expected NULL on connection failure");
+	ASSERT(!ok, "expected failure on connection failure");
 
 	talloc_free(ctx);
 	printf("  PASS: connection failure\n");
@@ -283,6 +391,9 @@ int main(void)
 	test_happy_path();
 	test_missing_user_profile();
 	test_missing_login_name();
+	test_tagged_node();
+	test_tags_without_user_profile();
+	test_empty_tags();
 	test_http_404();
 	test_oversized_response();
 	test_connection_failure();
