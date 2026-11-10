@@ -26,19 +26,23 @@
 #include <core/ntstatus.h>
 
 /*
- * Vendored private struct declarations from samba 4.23.8
+ * Vendored private struct declarations from samba 4.25.1
  * (source3/include/vfs.h, source3/smbd/globals.h).
  *
  * Only fields up to the ones we access are defined.  We never allocate
  * these structs — we only chase pointers into smbd's existing copies.
+ * The exception is vfs_fn_pointers: smbd reads every slot of the table we
+ * register, so its slot count must match smbd's exactly.
  *
- * Verified against samba-4.23.8 source3/include/vfs.h: connection_struct,
- * vfs_handle_struct and vfs_fn_pointers (98 fn slots, connect_fn/disconnect_fn
- * first) are byte-identical to 4.22.6; only SMB_VFS_INTERFACE_VERSION changed
- * (50 -> 51).
+ * Verified against samba-4.25.1: connection_struct, vfs_handle_struct,
+ * the leading smbd_server_connection fields and auth_session_info are
+ * unchanged from 4.23.10.  vfs_fn_pointers went from 98 to 97 slots
+ * (v52 added rename_stream and dropped connectpath and audit_file, v53
+ * added open_share_root and dropped getwd); connect_fn/disconnect_fn are
+ * still first.  SMB_VFS_INTERFACE_VERSION 51 -> 53.
  */
 
-#define SMB_VFS_INTERFACE_VERSION 51
+#define SMB_VFS_INTERFACE_VERSION 53
 
 /* Opaque types we only use as pointers */
 struct tsocket_address;
@@ -60,7 +64,7 @@ struct security_unix_token {
 
 /*
  * librpc/gen_ndr/auth.h — fields through unix_token.  Verified against
- * samba-4.23.8 gen_ndr/auth.h: security_token is the first pointer,
+ * samba-4.25.1 librpc/idl/auth.idl: security_token is the first pointer,
  * unix_token the second.
  */
 struct auth_session_info {
@@ -97,12 +101,12 @@ typedef struct connection_struct {
 	struct auth_session_info *session_info;
 } connection_struct;
 
-/* source3/include/vfs.h — 98 function pointer slots */
+/* source3/include/vfs.h — 97 function pointer slots */
 struct vfs_fn_pointers {
 	int (*connect_fn)(struct vfs_handle_struct *handle,
 			  const char *service, const char *user);
 	void (*disconnect_fn)(struct vfs_handle_struct *handle);
-	void *_padding[96];
+	void *_padding[95];
 };
 
 /* source3/include/vfs.h — full definition */

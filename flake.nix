@@ -29,11 +29,11 @@
         buildInputs = [ pkgs.samba pkgs.talloc pkgs.curl pkgs.jansson ];
 
         buildPhase = ''
-          # Assert Samba version matches vendored VFS structs (4.23.x = VFS interface v51)
+          # Assert Samba version matches vendored VFS structs (4.25.x = VFS interface v53)
           SAMBA_VERSION="${pkgs.samba.version}"
-          if [[ ! "$SAMBA_VERSION" =~ ^4\.23\. ]]; then
+          if [[ ! "$SAMBA_VERSION" =~ ^4\.25\. ]]; then
             echo "ERROR: Samba version mismatch"
-            echo "  Expected: 4.23.x (VFS interface version 51)"
+            echo "  Expected: 4.25.x (VFS interface version 53)"
             echo "  Found:    $SAMBA_VERSION"
             echo "  Update vendored struct declarations in vfs_tailscale.c"
             exit 1
